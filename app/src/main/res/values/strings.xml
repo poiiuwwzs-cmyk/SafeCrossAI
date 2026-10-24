@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SafeCross AI</string>
+    <string name="status_none">ما كشفت مركبة بالصورة حالياً</string>
+    <string name="status_caution">انتبه: مركبة بالصورة</string>
+    <string name="status_danger">خطر: مركبة تقترب!</string>
+    <string name="permission_needed">نحتاج صلاحية الكاميرا حتى يشتغل التطبيق</string>
+    <string name="detector_error">تعذر تشغيل نموذج الكشف</string>
+    <string name="disclaimer">التطبيق مساعد فقط، وعدم ظهور تنبيه لا يعني أن العبور آمن. تأكد بعينك دائماً.</string>
+</resources>
