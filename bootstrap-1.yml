@@ -1,0 +1,614 @@
+name: Bootstrap SafeCrossAI project
+
+# One-time setup: creates the full Android project in this repo, commits it,
+# then builds app-debug.apk. After it succeeds you can delete this file.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/bootstrap.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate project files
+        run: |
+          if [ -f settings.gradle.kts ]; then echo "Project already exists - skipping generation"; exit 0; fi
+          mkdir -p "$(dirname '.gitignore')"
+          cat > '.gitignore' <<'EOF_SAFECROSS'
+          *.iml
+          .gradle/
+          .idea/
+          local.properties
+          build/
+          captures/
+          .externalNativeBuild/
+          .cxx/
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'README.md')"
+          cat > 'README.md' <<'EOF_SAFECROSS'
+          # SafeCross AI
+
+          تطبيق أندرويد (Kotlin + XML) يستخدم الكاميرا لكشف المركبات على الجهاز وتنبيه المشاة.
+
+          - الكشف: MediaPipe + EfficientDet-Lite0 (النموذج في `app/src/main/assets/`)
+          - الصلاحيات: الكاميرا فقط (+ الاهتزاز وهي صلاحية عادية)
+          - المعالجة محلية، ولا يُرفع أي فيديو
+          - منطق الخطر في `risk/RiskEngine.kt` (عتبات تقريبية غير معايرة)
+
+          > التطبيق مساعد فقط. عدم ظهور تنبيه لا يعني أن العبور آمن.
+
+          البناء: `./gradlew assembleDebug` والناتج في `app/build/outputs/apk/debug/app-debug.apk`
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/build.gradle.kts')"
+          cat > 'app/build.gradle.kts' <<'EOF_SAFECROSS'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.safecross.ai"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.safecross.ai"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "0.1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              buildFeatures {
+                  viewBinding = true
+              }
+              androidResources {
+                  noCompress.add("tflite")
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("com.google.android.material:material:1.12.0")
+
+              val cameraxVersion = "1.3.4"
+              implementation("androidx.camera:camera-core:$cameraxVersion")
+              implementation("androidx.camera:camera-camera2:$cameraxVersion")
+              implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+              implementation("androidx.camera:camera-view:$cameraxVersion")
+
+              implementation("com.google.mediapipe:tasks-vision:0.10.18")
+
+              testImplementation("junit:junit:4.13.2")
+          }
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/AndroidManifest.xml')"
+          cat > 'app/src/main/AndroidManifest.xml' <<'EOF_SAFECROSS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-feature
+                  android:name="android.hardware.camera"
+                  android:required="true" />
+
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.SafeCross">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+
+          </manifest>
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/java/com/safecross/ai/MainActivity.kt')"
+          cat > 'app/src/main/java/com/safecross/ai/MainActivity.kt' <<'EOF_SAFECROSS'
+          package com.safecross.ai
+
+          import android.Manifest
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.Matrix
+          import android.media.AudioManager
+          import android.media.ToneGenerator
+          import android.os.Bundle
+          import android.os.SystemClock
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.camera.core.CameraSelector
+          import androidx.camera.core.ImageAnalysis
+          import androidx.camera.core.ImageProxy
+          import androidx.camera.core.Preview
+          import androidx.camera.lifecycle.ProcessCameraProvider
+          import androidx.core.content.ContextCompat
+          import com.safecross.ai.databinding.ActivityMainBinding
+          import com.safecross.ai.detect.VehicleDetector
+          import com.safecross.ai.risk.RiskEngine
+          import com.safecross.ai.risk.RiskLevel
+          import java.util.concurrent.ExecutorService
+          import java.util.concurrent.Executors
+          import java.util.concurrent.TimeUnit
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var binding: ActivityMainBinding
+              private lateinit var analysisExecutor: ExecutorService
+              private var detector: VehicleDetector? = null
+              private val riskEngine = RiskEngine()
+              private var lastAlertMs = 0L
+              private var tone: ToneGenerator? = null
+
+              private val permissionLauncher =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                      if (granted) startCamera() else showMessage(getString(R.string.permission_needed))
+                  }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  binding = ActivityMainBinding.inflate(layoutInflater)
+                  setContentView(binding.root)
+                  analysisExecutor = Executors.newSingleThreadExecutor()
+
+                  detector = try {
+                      VehicleDetector(applicationContext)
+                  } catch (e: Exception) {
+                      null
+                  }
+                  if (detector == null) {
+                      showMessage(getString(R.string.detector_error))
+                      return
+                  }
+
+                  if (hasCameraPermission()) {
+                      startCamera()
+                  } else {
+                      permissionLauncher.launch(Manifest.permission.CAMERA)
+                  }
+              }
+
+              private fun hasCameraPermission(): Boolean =
+                  ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                      PackageManager.PERMISSION_GRANTED
+
+              private fun startCamera() {
+                  val providerFuture = ProcessCameraProvider.getInstance(this)
+                  providerFuture.addListener({
+                      val provider = providerFuture.get()
+
+                      val preview = Preview.Builder().build().also {
+                          it.setSurfaceProvider(binding.previewView.surfaceProvider)
+                      }
+
+                      val analysis = ImageAnalysis.Builder()
+                          .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                          .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                          .build()
+                      analysis.setAnalyzer(analysisExecutor) { image -> analyze(image) }
+
+                      provider.unbindAll()
+                      provider.bindToLifecycle(
+                          this,
+                          CameraSelector.DEFAULT_BACK_CAMERA,
+                          preview,
+                          analysis
+                      )
+                  }, ContextCompat.getMainExecutor(this))
+              }
+
+              private fun analyze(image: ImageProxy) {
+                  try {
+                      val activeDetector = detector ?: return
+                      val bitmap = rotate(image.toBitmap(), image.imageInfo.rotationDegrees)
+                      val level = riskEngine.update(activeDetector.detect(bitmap))
+                      runOnUiThread { render(level) }
+                  } catch (e: Exception) {
+                      runOnUiThread { showMessage(getString(R.string.detector_error)) }
+                  } finally {
+                      image.close()
+                  }
+              }
+
+              private fun rotate(source: Bitmap, degrees: Int): Bitmap {
+                  if (degrees == 0) return source
+                  val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+                  return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+              }
+
+              private fun render(level: RiskLevel) {
+                  val (textRes, colorRes) = when (level) {
+                      RiskLevel.NONE -> R.string.status_none to R.color.risk_none
+                      RiskLevel.CAUTION -> R.string.status_caution to R.color.risk_caution
+                      RiskLevel.DANGER -> R.string.status_danger to R.color.risk_danger
+                  }
+                  binding.statusText.setText(textRes)
+                  binding.statusText.setBackgroundColor(ContextCompat.getColor(this, colorRes))
+                  if (level == RiskLevel.DANGER) alert()
+              }
+
+              private fun showMessage(message: String) {
+                  binding.statusText.text = message
+                  binding.statusText.setBackgroundColor(ContextCompat.getColor(this, R.color.risk_none))
+              }
+
+              @Suppress("DEPRECATION")
+              private fun alert() {
+                  val now = SystemClock.elapsedRealtime()
+                  if (now - lastAlertMs < 1000) return
+                  lastAlertMs = now
+
+                  val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                  vibrator?.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
+
+                  if (tone == null) tone = ToneGenerator(AudioManager.STREAM_ALARM, 80)
+                  tone?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 250)
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  analysisExecutor.shutdown()
+                  try {
+                      analysisExecutor.awaitTermination(1, TimeUnit.SECONDS)
+                  } catch (e: InterruptedException) {
+                      Thread.currentThread().interrupt()
+                  }
+                  detector?.close()
+                  tone?.release()
+              }
+          }
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/java/com/safecross/ai/detect/VehicleDetector.kt')"
+          cat > 'app/src/main/java/com/safecross/ai/detect/VehicleDetector.kt' <<'EOF_SAFECROSS'
+          package com.safecross.ai.detect
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import com.google.mediapipe.framework.image.BitmapImageBuilder
+          import com.google.mediapipe.tasks.core.BaseOptions
+          import com.google.mediapipe.tasks.vision.core.RunningMode
+          import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+          import com.safecross.ai.risk.VehicleBox
+
+          /** On-device vehicle detection (EfficientDet-Lite0, COCO labels). No video leaves the phone. */
+          class VehicleDetector(context: Context) : AutoCloseable {
+
+              private val detector: ObjectDetector
+
+              init {
+                  val baseOptions = BaseOptions.builder()
+                      .setModelAssetPath(MODEL_ASSET)
+                      .build()
+                  val options = ObjectDetector.ObjectDetectorOptions.builder()
+                      .setBaseOptions(baseOptions)
+                      .setRunningMode(RunningMode.IMAGE)
+                      .setScoreThreshold(0.4f)
+                      .setMaxResults(10)
+                      .build()
+                  detector = ObjectDetector.createFromOptions(context, options)
+              }
+
+              fun detect(bitmap: Bitmap): List<VehicleBox> {
+                  val result = detector.detect(BitmapImageBuilder(bitmap).build())
+                  val w = bitmap.width.toFloat()
+                  val h = bitmap.height.toFloat()
+                  return result.detections().mapNotNull { detection ->
+                      val category = detection.categories().firstOrNull() ?: return@mapNotNull null
+                      val name = category.categoryName()
+                      if (name !in VEHICLE_LABELS) return@mapNotNull null
+                      val box = detection.boundingBox()
+                      VehicleBox(
+                          label = name,
+                          left = (box.left / w).coerceIn(0f, 1f),
+                          top = (box.top / h).coerceIn(0f, 1f),
+                          right = (box.right / w).coerceIn(0f, 1f),
+                          bottom = (box.bottom / h).coerceIn(0f, 1f)
+                      )
+                  }
+              }
+
+              override fun close() {
+                  detector.close()
+              }
+
+              companion object {
+                  const val MODEL_ASSET = "efficientdet_lite0.tflite"
+                  val VEHICLE_LABELS = setOf("car", "truck", "bus", "motorcycle", "bicycle")
+              }
+          }
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/java/com/safecross/ai/risk/RiskEngine.kt')"
+          cat > 'app/src/main/java/com/safecross/ai/risk/RiskEngine.kt' <<'EOF_SAFECROSS'
+          package com.safecross.ai.risk
+
+          enum class RiskLevel { NONE, CAUTION, DANGER }
+
+          /** A detected vehicle. Coordinates are normalized to 0..1 relative to the frame. */
+          data class VehicleBox(
+              val label: String,
+              val left: Float,
+              val top: Float,
+              val right: Float,
+              val bottom: Float
+          ) {
+              val areaFraction: Float
+                  get() = (right - left).coerceAtLeast(0f) * (bottom - top).coerceAtLeast(0f)
+          }
+
+          /**
+           * Simple heuristic risk engine.
+           *
+           * A bigger box means a closer vehicle; a box that keeps growing between frames
+           * means the vehicle is approaching. The thresholds are NOT calibrated and the
+           * result must never be presented as a guarantee that crossing is safe.
+           */
+          class RiskEngine(
+              private val cautionArea: Float = 0.04f,
+              private val dangerArea: Float = 0.15f,
+              private val growthFactor: Float = 1.15f,
+              private val dangerStreak: Int = 2
+          ) {
+              private var lastMaxArea = 0f
+              private var growthStreak = 0
+
+              fun reset() {
+                  lastMaxArea = 0f
+                  growthStreak = 0
+              }
+
+              fun update(boxes: List<VehicleBox>): RiskLevel {
+                  val vehicles = boxes.filter { it.areaFraction > 0f }
+                  if (vehicles.isEmpty()) {
+                      reset()
+                      return RiskLevel.NONE
+                  }
+
+                  val maxArea = vehicles.maxOf { it.areaFraction }
+                  val growing = lastMaxArea > 0f && maxArea > lastMaxArea * growthFactor
+                  growthStreak = if (growing) growthStreak + 1 else 0
+                  lastMaxArea = maxArea
+
+                  return when {
+                      maxArea >= dangerArea -> RiskLevel.DANGER
+                      maxArea >= cautionArea && growthStreak >= dangerStreak -> RiskLevel.DANGER
+                      else -> RiskLevel.CAUTION
+                  }
+              }
+          }
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/res/layout/activity_main.xml')"
+          cat > 'app/src/main/res/layout/activity_main.xml' <<'EOF_SAFECROSS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#000000">
+
+              <androidx.camera.view.PreviewView
+                  android:id="@+id/previewView"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent" />
+
+              <TextView
+                  android:id="@+id/statusText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_gravity="top"
+                  android:background="@color/risk_none"
+                  android:gravity="center"
+                  android:padding="20dp"
+                  android:text="@string/status_none"
+                  android:textColor="#FFFFFF"
+                  android:textSize="24sp"
+                  android:textStyle="bold" />
+
+              <TextView
+                  android:id="@+id/disclaimerText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_gravity="bottom"
+                  android:background="#B3000000"
+                  android:gravity="center"
+                  android:padding="12dp"
+                  android:text="@string/disclaimer"
+                  android:textColor="#FFFFFF"
+                  android:textSize="15sp" />
+
+          </FrameLayout>
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/res/values-en/strings.xml')"
+          cat > 'app/src/main/res/values-en/strings.xml' <<'EOF_SAFECROSS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">SafeCross AI</string>
+              <string name="status_none">No vehicle detected in view</string>
+              <string name="status_caution">Caution: vehicle in view</string>
+              <string name="status_danger">Danger: vehicle approaching!</string>
+              <string name="permission_needed">Camera permission is required</string>
+              <string name="detector_error">Could not run the detection model</string>
+              <string name="disclaimer">This app is only an aid. No alert does NOT mean it is safe to cross. Always check with your own eyes.</string>
+          </resources>
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/res/values/colors.xml')"
+          cat > 'app/src/main/res/values/colors.xml' <<'EOF_SAFECROSS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="risk_none">#37474F</color>
+              <color name="risk_caution">#E65100</color>
+              <color name="risk_danger">#B71C1C</color>
+          </resources>
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/res/values/strings.xml')"
+          cat > 'app/src/main/res/values/strings.xml' <<'EOF_SAFECROSS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">SafeCross AI</string>
+              <string name="status_none">ما كشفت مركبة بالصورة حالياً</string>
+              <string name="status_caution">انتبه: مركبة بالصورة</string>
+              <string name="status_danger">خطر: مركبة تقترب!</string>
+              <string name="permission_needed">نحتاج صلاحية الكاميرا حتى يشتغل التطبيق</string>
+              <string name="detector_error">تعذر تشغيل نموذج الكشف</string>
+              <string name="disclaimer">التطبيق مساعد فقط، وعدم ظهور تنبيه لا يعني أن العبور آمن. تأكد بعينك دائماً.</string>
+          </resources>
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/main/res/values/themes.xml')"
+          cat > 'app/src/main/res/values/themes.xml' <<'EOF_SAFECROSS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.SafeCross" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+          </resources>
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'app/src/test/java/com/safecross/ai/risk/RiskEngineTest.kt')"
+          cat > 'app/src/test/java/com/safecross/ai/risk/RiskEngineTest.kt' <<'EOF_SAFECROSS'
+          package com.safecross.ai.risk
+
+          import org.junit.Assert.assertEquals
+          import org.junit.Test
+
+          class RiskEngineTest {
+
+              // A box whose normalized area equals [area].
+              private fun box(area: Float) = VehicleBox("car", 0f, 0f, area, 1f)
+
+              @Test
+              fun noVehicles_isNone() {
+                  assertEquals(RiskLevel.NONE, RiskEngine().update(emptyList()))
+              }
+
+              @Test
+              fun farVehicle_isCaution() {
+                  assertEquals(RiskLevel.CAUTION, RiskEngine().update(listOf(box(0.02f))))
+              }
+
+              @Test
+              fun veryLargeVehicle_isDanger() {
+                  assertEquals(RiskLevel.DANGER, RiskEngine().update(listOf(box(0.30f))))
+              }
+
+              @Test
+              fun steadilyGrowingVehicle_becomesDanger() {
+                  val engine = RiskEngine()
+                  assertEquals(RiskLevel.CAUTION, engine.update(listOf(box(0.05f))))
+                  assertEquals(RiskLevel.CAUTION, engine.update(listOf(box(0.06f))))
+                  assertEquals(RiskLevel.DANGER, engine.update(listOf(box(0.07f))))
+              }
+
+              @Test
+              fun vehicleLeaving_resetsToNone() {
+                  val engine = RiskEngine()
+                  engine.update(listOf(box(0.30f)))
+                  assertEquals(RiskLevel.NONE, engine.update(emptyList()))
+              }
+          }
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'build.gradle.kts')"
+          cat > 'build.gradle.kts' <<'EOF_SAFECROSS'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'gradle.properties')"
+          cat > 'gradle.properties' <<'EOF_SAFECROSS'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOF_SAFECROSS
+          mkdir -p "$(dirname 'settings.gradle.kts')"
+          cat > 'settings.gradle.kts' <<'EOF_SAFECROSS'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SafeCrossAI"
+          include(":app")
+          EOF_SAFECROSS
+          # Gradle wrapper (generated in a temp dir so no Android config is needed)
+          mkdir -p /tmp/wrap
+          ( cd /tmp/wrap && touch settings.gradle.kts && gradle wrapper --gradle-version 8.9 --no-daemon )
+          cp /tmp/wrap/gradlew /tmp/wrap/gradlew.bat .
+          mkdir -p gradle/wrapper
+          cp /tmp/wrap/gradle/wrapper/* gradle/wrapper/
+          chmod +x gradlew
+          # Detection model (EfficientDet-Lite0, Google MediaPipe)
+          mkdir -p app/src/main/assets
+          curl -fL --retry 3 -o app/src/main/assets/efficientdet_lite0.tflite "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/1/efficientdet_lite0.tflite"
+
+      - name: Commit project to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit -m "Add SafeCrossAI Android project"
+            git push
+          fi
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Unit tests
+        continue-on-error: true
+        run: ./gradlew testDebugUnitTest
