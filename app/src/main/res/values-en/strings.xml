@@ -2,8 +2,10 @@
 <resources>
     <string name="app_name">SafeCross AI</string>
     <string name="status_none">No vehicle detected in view</string>
-    <string name="status_caution">Caution: vehicle in view</string>
+    <string name="status_parked">Parked or stopped vehicles in view, not approaching</string>
+    <string name="status_caution">Caution: moving vehicle in view</string>
     <string name="status_danger">Danger: vehicle approaching!</string>
+    <string name="status_speed_estimate">Rough speed estimate: %1$d km/h</string>
     <string name="permission_needed">Camera permission is required</string>
     <string name="detector_error">Could not run the detection model</string>
     <string name="disclaimer">This app is only an aid. No alert does NOT mean it is safe to cross. Always check with your own eyes.</string>
