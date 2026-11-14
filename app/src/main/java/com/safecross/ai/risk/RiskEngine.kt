@@ -14,6 +14,16 @@ data class VehicleBox(
     val height: Float get() = (bottom - top).coerceAtLeast(0f)
     val centerX: Float get() = (left + right) / 2f
     val areaFraction: Float get() = width * height
+
+    /** The box touches the top or bottom of the frame, so its height is cut off. */
+    val clippedVertically: Boolean get() = top <= EDGE || bottom >= 1f - EDGE
+
+    /** The box touches the left or right of the frame, so its width is cut off. */
+    val clippedHorizontally: Boolean get() = left <= EDGE || right >= 1f - EDGE
+
+    private companion object {
+        const val EDGE = 0.01f
+    }
 }
 
 data class RiskResult(
@@ -21,7 +31,11 @@ data class RiskResult(
     /** The most urgent vehicle, or null when nothing needs attention. */
     val focus: TrackMotion?,
     /** How many vehicles in view are standing still (parked or waiting). */
-    val stationaryCount: Int
+    val stationaryCount: Int,
+    /** How many vehicles were detected in this frame. */
+    val vehicleCount: Int = 0,
+    /** The phone itself was moving, so vehicle motion could not be measured. */
+    val phoneMoving: Boolean = false
 )
 
 /**
@@ -33,6 +47,12 @@ data class RiskResult(
  *  - approaching slowly, moving sideways, or not yet known -> CAUTION
  *  - standing still or moving away -> ignored
  *
+ * While the phone itself is moving, camera motion would look like vehicle
+ * motion, so all history is dropped and only a conservative CAUTION for big
+ * vehicles is given until the phone is still again.
+ *
+ * DANGER is held for a short time so the alarm does not flicker on and off.
+ *
  * The thresholds are NOT calibrated on real traffic and the result must never be
  * presented as a guarantee that crossing is safe.
  */
@@ -40,18 +60,49 @@ class RiskEngine(
     private val cautionArea: Float = 0.04f,
     private val dangerTtcSeconds: Double = 4.0,
     private val cautionTtcSeconds: Double = 8.0,
+    private val dangerHoldMs: Long = 700L,
     private val tracker: VehicleTracker = VehicleTracker()
 ) {
+    private var lastDangerMs: Long? = null
+    private var lastDangerFocus: TrackMotion? = null
+
     fun reset() {
         tracker.reset()
+        lastDangerMs = null
+        lastDangerFocus = null
     }
 
     fun update(
         boxes: List<VehicleBox>,
         nowMs: Long,
-        calibration: CameraCalibration? = null
+        calibration: CameraCalibration? = null,
+        phoneSteady: Boolean = true
     ): RiskResult {
-        val motions = tracker.update(boxes, nowMs, calibration)
+        val vehicles = boxes.filter { it.areaFraction > 0f }
+
+        val raw = if (!phoneSteady) {
+            tracker.reset()
+            val big = vehicles.any { it.areaFraction >= cautionArea }
+            RiskResult(
+                level = if (big) RiskLevel.CAUTION else RiskLevel.NONE,
+                focus = null,
+                stationaryCount = 0,
+                vehicleCount = vehicles.size,
+                phoneMoving = true
+            )
+        } else {
+            assess(vehicles, nowMs, calibration)
+        }
+
+        return holdDanger(raw, nowMs)
+    }
+
+    private fun assess(
+        vehicles: List<VehicleBox>,
+        nowMs: Long,
+        calibration: CameraCalibration?
+    ): RiskResult {
+        val motions = tracker.update(vehicles, nowMs, calibration)
 
         var focus: TrackMotion? = null
         var level = RiskLevel.NONE
@@ -65,7 +116,22 @@ class RiskEngine(
             }
         }
         val stationary = motions.count { it.state == Motion.STATIONARY }
-        return RiskResult(level, focus, stationary)
+        return RiskResult(level, focus, stationary, motions.size)
+    }
+
+    private fun holdDanger(raw: RiskResult, nowMs: Long): RiskResult {
+        if (raw.level == RiskLevel.DANGER) {
+            lastDangerMs = nowMs
+            lastDangerFocus = raw.focus
+            return raw
+        }
+        val since = lastDangerMs?.let { nowMs - it }
+        if (since != null && since in 0 until dangerHoldMs) {
+            return raw.copy(level = RiskLevel.DANGER, focus = raw.focus ?: lastDangerFocus)
+        }
+        lastDangerMs = null
+        lastDangerFocus = null
+        return raw
     }
 
     private fun levelFor(m: TrackMotion): RiskLevel = when (m.state) {
