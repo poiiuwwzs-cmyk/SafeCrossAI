@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SafeCross AI</string>
-    <string name="status_none">ما كشفت مركبة بالصورة حالياً</string>
-    <string name="status_parked">مركبات واقفة بالصورة وما تقترب</string>
-    <string name="status_caution">انتبه: مركبة تتحرك بالصورة</string>
-    <string name="status_danger">خطر: مركبة تقترب!</string>
-    <string name="status_speed_estimate">السرعة التقريبية: %1$d كم/س (تقدير)</string>
+    <string name="status_none">ما دا أشوف مركبة بالكاميرا هسه</string>
+    <string name="status_parked">اكو سيارة واقفة، ما دا تقرب</string>
+    <string name="status_not_approaching">اكو مركبة بس ما دا تقرب عليك</string>
+    <string name="status_hold_steady">ثبّت الموبايل شوية حتى أكدر أحسب حركة السيارات</string>
+    <string name="status_caution">انتبه: اكو مركبة دا تتحرك</string>
+    <string name="status_caution_unsteady">انتبه: اكو مركبة قريبة، ثبّت الموبايل</string>
+    <string name="status_danger">خطر: مركبة دا تقرب عليك!</string>
+    <string name="status_speed_estimate">سرعتها تقريباً %1$d كم/س (تقدير)</string>
     <string name="permission_needed">نحتاج صلاحية الكاميرا حتى يشتغل التطبيق</string>
-    <string name="detector_error">تعذر تشغيل نموذج الكشف</string>
-    <string name="disclaimer">التطبيق مساعد فقط، وعدم ظهور تنبيه لا يعني أن العبور آمن. تأكد بعينك دائماً.</string>
+    <string name="detector_error">صار خلل بالكشف، سكّر التطبيق وافتحه مرة ثانية</string>
+    <string name="disclaimer">التطبيق بس يساعدك. إذا ما طلع تنبيه، هذا ما يعني العبور آمن. باوع بعينك دائماً.</string>
 </resources>
